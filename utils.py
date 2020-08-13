@@ -1,9 +1,9 @@
-import numpy as np
-from mxnet import image, nd
-import mxnet as mx
+from mxnet import image, nd,init
 from mxnet import gluon
-from mxnet.gluon import nn
-from mxnet.gluon.data import vision
+from mxnet.gluon import nn, model_zoo
+import numpy as np
+import mxnet as mx
+
 
 ctx = mx.gpu()
 data_dir = './data'
@@ -96,27 +96,44 @@ def transform_test_299(data, label):
 def accuracy(output, labels):
     return nd.mean(nd.argmax(output, axis=1) == labels).asscalar()
 
+class  ConcatNet(nn.HybridBlock):
+    def __init__(self,net1,net2,**kwargs):
+        super(ConcatNet,self).__init__(**kwargs)
+        self.net1 = nn.HybridSequential()
+        self.net1.add(net1)
+        self.net1.add(nn.GlobalAvgPool2D())
+        self.net2 = nn.HybridSequential()
+        self.net2.add(net2)
+        self.net2.add(nn.GlobalAvgPool2D())
+    def hybrid_forward(self,F,x1,x2):
+        return F.concat(*[self.net1(x1),self.net2(x2)])
 
-train_ds_224 = vision.ImageFolderDataset(input_str + train_dir, flag=1,
-                                         transform=transform_train_224)
-train_ds_299 = vision.ImageFolderDataset(input_str + train_dir, flag=1,
-                                         transform=transform_train_299)
-valid_ds_224 = vision.ImageFolderDataset(input_str + valid_dir, flag=1,
-                                         transform=transform_test_224)
-valid_ds_299 = vision.ImageFolderDataset(input_str + valid_dir, flag=1,
-                                         transform=transform_test_299)
-train_valid_ds_224 = vision.ImageFolderDataset(input_str + train_valid_dir,
-                                               flag=1, transform=transform_train_224)
-train_valid_ds_299 = vision.ImageFolderDataset(input_str + train_valid_dir,
-                                               flag=1, transform=transform_train_299)
-batch_size = 32
 
-loader = gluon.data.DataLoader
-train_iter_224 = loader(train_ds_224, batch_size, shuffle=True, last_batch='keep')
-train_iter_299 = loader(train_ds_299, batch_size, shuffle=True, last_batch='keep')
-valid_iter_224 = loader(valid_ds_224, batch_size, shuffle=True, last_batch='keep')
-valid_iter_299 = loader(valid_ds_299, batch_size, shuffle=True, last_batch='keep')
-train_valid_iter_224 = loader(train_valid_ds_224, batch_size, shuffle=True,
-                              last_batch='keep')
-train_valid_iter_299 = loader(train_valid_ds_299, batch_size, shuffle=True,
-                              last_batch='keep')
+class  OneNet(nn.HybridBlock):
+    def __init__(self,features,output,**kwargs):
+        super(OneNet,self).__init__(**kwargs)
+        self.features = features
+        self.output = output
+    def hybrid_forward(self,F,x1,x2):
+        return self.output(self.features(x1,x2))
+
+
+class Net():
+    def __init__(self,ctx,nameparams=None):
+        inception = model_zoo.vision.inception_v3(pretrained=True,ctx=ctx).features
+        resnet = model_zoo.vision.resnet152_v1(pretrained=True,ctx=ctx).features
+        self.features = ConcatNet(resnet,inception)
+        self.output = self.__get_output(ctx,nameparams)
+        self.net = OneNet(self.features,self.output)
+    def __get_output(self,ctx,ParamsName=None):
+        net = nn.HybridSequential("output")
+        with net.name_scope():
+            net.add(nn.Dense(256,activation='relu'))
+            net.add(nn.Dropout(.5))
+            net.add(nn.Dense(120))
+        if ParamsName is not None:
+            net.collect_params().load(ParamsName,ctx)
+        else:
+            net.initialize(init = init.Xavier(),ctx=ctx)
+        return net
+
